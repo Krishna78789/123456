@@ -10,14 +10,17 @@ import yt_dlp
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
+# 1. Environment Variables Configuration
 API_ID_RAW = os.environ.get("API_ID", "").strip()
 API_HASH = os.environ.get("API_HASH", "").strip()
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 PORT = int(os.environ.get("PORT", 8000))
+LOG_CHANNEL_RAW = os.environ.get("LOG_CHANNEL", "").strip()
 
 API_ID = int(API_ID_RAW) if API_ID_RAW else 0
+LOG_CHANNEL = int(LOG_CHANNEL_RAW) if LOG_CHANNEL_RAW else None
 
-# 1. Koyeb Health Check Web Server
+# 2. Koyeb Health Check Web Server
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -34,9 +37,8 @@ def run_health_server():
 
 threading.Thread(target=run_health_server, daemon=True).start()
 
-# 2. Telegram Bot Client
+# 3. Telegram Bot Client & Stop Registry
 app = Client("txt_downloader_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
 USER_STOP_FLAGS = {}
 
 def humanbytes(size):
@@ -100,6 +102,7 @@ def fix_and_get_metadata(input_file):
     output_file = input_file + "_playable.mp4"
     thumb_path = input_file + "_thumb.jpg"
     
+    # 1. Faststart Remux (Telegram in-app player fix)
     cmd_remux = [
         "ffmpeg", "-y", "-i", input_file,
         "-c", "copy",
@@ -112,10 +115,10 @@ def fix_and_get_metadata(input_file):
     except Exception:
         target_file = input_file
 
+    # 2. Extract Exact 16:9 Width, Height & Duration
     duration = 0
     width = 1280
     height = 720
-    
     try:
         cmd_meta = [
             "ffprobe", "-v", "error",
@@ -135,6 +138,7 @@ def fix_and_get_metadata(input_file):
     except Exception:
         pass
 
+    # 3. Extract Widescreen Thumbnail
     cmd_thumb = [
         "ffmpeg", "-y", "-ss", "00:00:05", "-i", target_file,
         "-vframes", "1", "-q:v", "2", thumb_path
@@ -210,8 +214,8 @@ def download_video(url, output_path, status_msg, loop, custom_title, user_id):
         'format': 'best',
         'quiet': True,
         'no_warnings': True,
-        'socket_timeout': 30,           # हैंग होने से रोकने के लिए 30 सेकंड का टाइमआउट
-        'retries': 5,                   # कनेक्शन कटने पर 5 बार री-ट्राई
+        'socket_timeout': 30,
+        'retries': 5,
         'fragment_retries': 5,
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -232,10 +236,11 @@ def download_video(url, output_path, status_msg, loop, custom_title, user_id):
 async def start_cmd(client: Client, message: Message):
     await message.reply_text(
         "👋 **नमस्ते!**\n\n"
-        "मुझे लिंक्स वाली `.txt` फ़ाइल भेजें।\n"
-        "- **वीडियो लिंक**: 16:9 वीडियो प्लेयर में अपलोड होगी।\n"
-        "- **PDF लिंक**: डायरेक्ट डॉक्यूमेंट में अपलोड होगी।\n\n"
-        "🛑 प्रोसेस बीच में रोकने के लिए कभी भी `/stop` भेज सकते हैं।"
+        "मुझे लिंक्स वाली `.txt` फ़ाइल भेजें। फ़ॉर्मेट:\n"
+        "`Lecture Name : https://link.com/video.mp4`\n\n"
+        "- **वीडियो लिंक**: 16:9 प्लेयर में अपलोड होगी।\n"
+        "- **PDF लिंक**: सीधे PDF डॉक्यूमेंट के रूप में मिलेगी।\n\n"
+        "🛑 बीच में प्रोसेस रोकने के लिए `/stop` भेज सकते हैं।"
     )
 
 @app.on_message(filters.command("stop"))
@@ -284,6 +289,11 @@ async def handle_document(client: Client, message: Message):
             os.remove(file_path)
         return
 
+    # User Details for Log Channel
+    u_first = message.from_user.first_name or "Unknown"
+    u_user = f"@{message.from_user.username}" if message.from_user.username else "No Username"
+    user_info = f"👤 **User:** [{u_first}](tg://user?id={user_id}) ({u_user})\n🆔 **ID:** `{user_id}`"
+
     await status_msg.edit_text(f"कुल **{total_links}** लिंक्स मिली हैं। प्रोसेसिंग शुरू हो रही है...\n_(रोकने के लिए /stop भेजें)_")
     loop = asyncio.get_event_loop()
 
@@ -294,7 +304,7 @@ async def handle_document(client: Client, message: Message):
 
         display_title = given_title if given_title else f"Item {index}"
 
-        # 1. PDF
+        # 1. Processing PDF Document
         if is_pdf_url(url):
             try:
                 await status_msg.edit_text(f"⏳ **[{index}/{total_links}]** PDF डाउनलोड हो रही है:\n📄 **{display_title}**")
@@ -308,8 +318,8 @@ async def handle_document(client: Client, message: Message):
                 await status_msg.edit_text(f"📤 **[{index}/{total_links}]** PDF टेलीग्राम पर भेजी जा रही है...")
                 start_time = time.time()
 
-                caption_text = f"📄 **Title**: {display_title}"
-                await client.send_document(
+                caption_text = f"🎬 **Title**: {display_title}"
+                sent_doc = await client.send_document(
                     chat_id=message.chat.id,
                     document=pdf_file,
                     caption=caption_text,
@@ -317,13 +327,21 @@ async def handle_document(client: Client, message: Message):
                     progress_args=("Uploading PDF", status_msg, start_time, display_title, user_id)
                 )
 
+                # Auto Log Copy to Channel / Admin
+                if LOG_CHANNEL and sent_doc:
+                    try:
+                        log_caption = f"{caption_text}\n\n📥 **Downloaded By:**\n{user_info}"
+                        await sent_doc.copy(chat_id=LOG_CHANNEL, caption=log_caption)
+                    except Exception:
+                        pass
+
                 if os.path.exists(pdf_file):
                     os.remove(pdf_file)
 
             except Exception as e:
                 await message.reply_text(f"⚠️ **[{index}/{total_links}] PDF एरर:**\nTitle: `{display_title}`\nकारण: `{str(e)[:200]}`")
 
-        # 2. Video
+        # 2. Processing Video
         else:
             try:
                 await status_msg.edit_text(f"⏳ **[{index}/{total_links}]** डाउनलोड शुरू:\n🎬 **{display_title}**")
@@ -343,9 +361,10 @@ async def handle_document(client: Client, message: Message):
                 await status_msg.edit_text(f"📤 **[{index}/{total_links}]** टेलीग्राम पर अपलोड हो रहा है:\n🎬 **{final_title}**")
                 start_time = time.time()
 
+                # साफ़ और केवल टाइटल वाला कैप्शन
                 caption_text = f"🎬 **Title**: {final_title}"
 
-                await client.send_video(
+                sent_video = await client.send_video(
                     chat_id=message.chat.id,
                     video=final_video,
                     caption=caption_text,
@@ -357,6 +376,14 @@ async def handle_document(client: Client, message: Message):
                     progress=progress_for_pyrogram,
                     progress_args=("Uploading Video", status_msg, start_time, final_title, user_id)
                 )
+
+                # Auto Log Copy to Channel / Admin
+                if LOG_CHANNEL and sent_video:
+                    try:
+                        log_caption = f"{caption_text}\n\n📥 **Downloaded By:**\n{user_info}"
+                        await sent_video.copy(chat_id=LOG_CHANNEL, caption=log_caption)
+                    except Exception:
+                        pass
 
                 for f in [final_video, raw_filename, thumb_path]:
                     if f and os.path.exists(f):
@@ -379,3 +406,4 @@ async def handle_document(client: Client, message: Message):
 if __name__ == "__main__":
     print("Telegram Bot Live & Running...", flush=True)
     app.run()
+    
