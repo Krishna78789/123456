@@ -1,15 +1,29 @@
 import os
 import asyncio
 import yt_dlp
+from aiohttp import web
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-# पर्यावरण चरों (Environment Variables) से क्रेडेंशियल्स प्राप्त करें
+# Environment Variables
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+PORT = int(os.environ.get("PORT", 8000))
 
 app = Client("txt_downloader_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+# Koyeb Health Check Web Server
+async def handle_ping(request):
+    return web.Response(text="Bot is running!")
+
+async def start_web_server():
+    server = web.Application()
+    server.router.add_get("/", handle_ping)
+    runner = web.AppRunner(server)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
 
 def download_video(url, output_path):
     ydl_opts = {
@@ -26,18 +40,18 @@ def download_video(url, output_path):
 @app.on_message(filters.command("start"))
 async def start_cmd(client: Client, message: Message):
     await message.reply_text(
-        "नमस्ते! मुझे वीडियो लिंक्स वाली .txt फ़ाइल भेजें।\n"
-        "फ़ाइल में हर पंक्ति (line) पर एक लिंक होना चाहिए।"
+        "Namaste! Mujhe video links wali .txt file bhejein.\n"
+        "File mein har line par ek link honi chahiye."
     )
 
 @app.on_message(filters.document)
 async def handle_document(client: Client, message: Message):
     doc = message.document
     if not doc.file_name.endswith(".txt"):
-        await message.reply_text("कृपया केवल .txt फ़ाइल ही भेजें।")
+        await message.reply_text("Kripya keval .txt file hi bhejein.")
         return
 
-    status_msg = await message.reply_text("फ़ाइल प्राप्त हुई, लिंक्स लोड हो रहे हैं...")
+    status_msg = await message.reply_text("File mili, links load ho rahe hain...")
     download_dir = f"downloads/{message.from_user.id}"
     os.makedirs(download_dir, exist_ok=True)
 
@@ -48,36 +62,42 @@ async def handle_document(client: Client, message: Message):
 
     total_links = len(links)
     if total_links == 0:
-        await status_msg.edit_text("फ़ाइल में कोई मान्य लिंक नहीं मिली।")
+        await status_msg.edit_text("File mein koi valid link nahi mili.")
         if os.path.exists(file_path):
             os.remove(file_path)
         return
 
-    await status_msg.edit_text(f"कुल {total_links} लिंक्स मिली हैं। डाउनलोडिंग शुरू की जा रही है...")
+    await status_msg.edit_text(f"Total {total_links} links mili hain. Downloading shuru ki ja rahi hai...")
 
     for index, url in enumerate(links, start=1):
         try:
-            await status_msg.edit_text(f"[{index}/{total_links}] डाउनलोड हो रहा है:\n{url}")
+            await status_msg.edit_text(f"[{index}/{total_links}] Download ho raha hai:\n{url}")
             
             loop = asyncio.get_event_loop()
             video_file = await loop.run_in_executor(None, download_video, url, download_dir)
 
-            await status_msg.edit_text(f"[{index}/{total_links}] अपलोड हो रहा है...")
+            await status_msg.edit_text(f"[{index}/{total_links}] Upload ho raha hai...")
             await client.send_document(
                 chat_id=message.chat.id,
                 document=video_file,
-                caption=f"डाउनलोड पूर्ण ({index}/{total_links})"
+                caption=f"Download complete ({index}/{total_links})"
             )
 
             if os.path.exists(video_file):
                 os.remove(video_file)
 
         except Exception as e:
-            await message.reply_text(f"[{index}/{total_links}] त्रुटि: {url}\nविवरण: {str(e)[:150]}")
+            await message.reply_text(f"[{index}/{total_links}] Error: {url}\nReason: {str(e)[:150]}")
 
-    await status_msg.edit_text("सभी लिंक्स की प्रोसेसिंग पूरी हो गई!")
+    await status_msg.edit_text("Sabhi links process ho gayi!")
     if os.path.exists(file_path):
         os.remove(file_path)
 
+async def main():
+    await start_web_server()
+    await app.start()
+    print("Bot aur Health-check server dono start ho gaye hain!")
+    await asyncio.Event().wait()
+
 if __name__ == "__main__":
-    app.run()
+    asyncio.run(main())
