@@ -3,6 +3,7 @@ import time
 import math
 import asyncio
 import threading
+import subprocess
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import yt_dlp
 from pyrogram import Client, filters
@@ -87,6 +88,35 @@ async def safe_edit_text(msg, text):
     except Exception:
         pass
 
+def fix_video_faststart(input_file):
+    """FFmpeg se moov atom ko video ke start me move karta hai taaki direct play ho sake"""
+    output_file = input_file + ".fixed.mp4"
+    cmd = [
+        "ffmpeg", "-y", "-i", input_file,
+        "-c", "copy",
+        "-movflags", "+faststart",
+        output_file
+    ]
+    try:
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        if os.path.exists(output_file):
+            os.remove(input_file)
+            os.rename(output_file, input_file)
+    except Exception:
+        if os.path.exists(output_file):
+            os.remove(output_file)
+
+def get_video_duration(file_path):
+    cmd = [
+        "ffprobe", "-v", "error", "-show_entries",
+        "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path
+    ]
+    try:
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        return int(float(result.stdout.strip()))
+    except Exception:
+        return 0
+
 def download_video(url, output_path, status_msg, loop, custom_title):
     last_update_time = [0]
 
@@ -112,19 +142,26 @@ def download_video(url, output_path, status_msg, loop, custom_title):
                 asyncio.run_coroutine_threadsafe(safe_edit_text(status_msg, text), loop)
 
     ydl_opts = {
-        'outtmpl': f'{output_path}/%(title)s.%(ext)s',
+        'outtmpl': f'{output_path}/lecture_%(id)s.%(ext)s',
         'format': 'best',
         'quiet': True,
         'no_warnings': True,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        },
         'progress_hooks': [ytdl_hook],
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
-        duration = info.get('duration', 0)
-        width = info.get('width', 0)
-        height = info.get('height', 0)
+        
+        # Video ko Telegram in-app playable banane ke liye faststart fix karein
+        fix_video_faststart(filename)
+        
+        duration = get_video_duration(filename) or info.get('duration', 0)
+        width = info.get('width', 1280)
+        height = info.get('height', 720)
         detected_title = info.get('title') or custom_title
         return filename, duration, width, height, detected_title
 
@@ -132,10 +169,9 @@ def download_video(url, output_path, status_msg, loop, custom_title):
 async def start_cmd(client: Client, message: Message):
     await message.reply_text(
         "👋 **Namaste!**\n\n"
-        "Mujhe `.txt` file bhejein. Format do tarah se ho sakta hai:\n\n"
-        "1. **Title ke sath:**\n`Lecture 1 : https://link.com/video.mp4`\n\n"
-        "2. **Direct Link:**\n`https://link.com/video.mp4`\n\n"
-        "Main caption mein video ka title aur download details add karke bhej dunga."
+        "Mujhe `.txt` file bhejein. Format:\n"
+        "`Lecture Name : https://link.com/video.mp4`\n\n"
+        "Videos direct playable player format me sahi duration ke saath upload honge."
     )
 
 @app.on_message(filters.document)
@@ -158,7 +194,6 @@ async def handle_document(client: Client, message: Message):
             if not clean_line:
                 continue
             
-            # Agar line mein "Title : Link" format ho
             if "http" in clean_line:
                 if ":" in clean_line and not clean_line.startswith("http"):
                     parts = clean_line.split("http", 1)
@@ -182,7 +217,7 @@ async def handle_document(client: Client, message: Message):
     for index, (given_title, url) in enumerate(items, start=1):
         display_title = given_title if given_title else f"Lecture {index}"
         try:
-            await status_msg.edit_text(f"⏳ **[{index}/{total_links}]** Download shuru:\n🎬 **{display_title}**\n🔗 `{url}`")
+            await status_msg.edit_text(f"⏳ **[{index}/{total_links}]** Download shuru:\n🎬 **{display_title}**")
             
             video_file, duration, width, height, detected_title = await loop.run_in_executor(
                 None, download_video, url, download_dir, status_msg, loop, display_title
@@ -193,7 +228,6 @@ async def handle_document(client: Client, message: Message):
             await status_msg.edit_text(f"📤 **[{index}/{total_links}]** Upload ho raha hai:\n🎬 **{final_title}**")
             start_time = time.time()
 
-            # Video Caption Format
             caption_text = (
                 f"🎬 **Title**: {final_title}\n\n"
                 f"📌 **Part**: {index}/{total_links}\n"
@@ -205,8 +239,8 @@ async def handle_document(client: Client, message: Message):
                 video=video_file,
                 caption=caption_text,
                 duration=int(duration) if duration else 0,
-                width=int(width) if width else 0,
-                height=int(height) if height else 0,
+                width=int(width) if width else 1280,
+                height=int(height) if height else 720,
                 supports_streaming=True,
                 progress=progress_for_pyrogram,
                 progress_args=("Uploading Video", status_msg, start_time, final_title)
@@ -216,9 +250,9 @@ async def handle_document(client: Client, message: Message):
                 os.remove(video_file)
 
         except Exception as e:
-            await message.reply_text(f"⚠️ **[{index}/{total_links}] Error:**\nTitle: `{display_title}`\nLink: `{url}`\nReason: `{str(e)[:200]}`")
+            await message.reply_text(f"⚠️ **[{index}/{total_links}] Error:**\nTitle: `{display_title}`\nReason: `{str(e)[:200]}`")
 
-    await status_msg.edit_text("✅ Sabhi lectures title ke sath upload ho chuke hain!")
+    await status_msg.edit_text("✅ Sabhi lectures properly upload ho chuke hain!")
     if os.path.exists(file_path):
         os.remove(file_path)
 
