@@ -2,18 +2,28 @@ import os
 import asyncio
 import yt_dlp
 from aiohttp import web
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import Message
 
-# Environment Variables
-API_ID = int(os.environ.get("API_ID", 0))
-API_HASH = os.environ.get("API_HASH", "")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+API_ID_RAW = os.environ.get("API_ID", "").strip()
+API_HASH = os.environ.get("API_HASH", "").strip()
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 PORT = int(os.environ.get("PORT", 8000))
+
+print("--- BOT INITIALIZING ---", flush=True)
+print(f"API_ID loaded: {bool(API_ID_RAW)}", flush=True)
+print(f"API_HASH loaded: {bool(API_HASH)}", flush=True)
+print(f"BOT_TOKEN loaded: {bool(BOT_TOKEN)}", flush=True)
+
+try:
+    API_ID = int(API_ID_RAW)
+except Exception as e:
+    print(f"ERROR: API_ID galat hai (sirf numbers hone chahiye): {e}", flush=True)
+    API_ID = 0
 
 app = Client("txt_downloader_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# Koyeb Health Check Web Server
+# Dummy Web Server (Koyeb Health Check)
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
 
@@ -24,6 +34,7 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
+    print(f"Health-check server running on port {PORT}", flush=True)
 
 def download_video(url, output_path):
     ydl_opts = {
@@ -34,11 +45,11 @@ def download_video(url, output_path):
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
-        return filename
+        return ydl.prepare_filename(info)
 
 @app.on_message(filters.command("start"))
 async def start_cmd(client: Client, message: Message):
+    print(f"Received /start from user: {message.from_user.id}", flush=True)
     await message.reply_text(
         "Namaste! Mujhe video links wali .txt file bhejein.\n"
         "File mein har line par ek link honi chahiye."
@@ -67,12 +78,11 @@ async def handle_document(client: Client, message: Message):
             os.remove(file_path)
         return
 
-    await status_msg.edit_text(f"Total {total_links} links mili hain. Downloading shuru ki ja rahi hai...")
+    await status_msg.edit_text(f"Total {total_links} links mili hain. Downloading shuru...")
 
     for index, url in enumerate(links, start=1):
         try:
             await status_msg.edit_text(f"[{index}/{total_links}] Download ho raha hai:\n{url}")
-            
             loop = asyncio.get_event_loop()
             video_file = await loop.run_in_executor(None, download_video, url, download_dir)
 
@@ -95,9 +105,12 @@ async def handle_document(client: Client, message: Message):
 
 async def main():
     await start_web_server()
+    print("Telegram client start kiya ja raha hai...", flush=True)
     await app.start()
-    print("Bot aur Health-check server dono start ho gaye hain!")
-    await asyncio.Event().wait()
+    me = await app.get_me()
+    print(f"BOT SUCCESSFULLY STARTED AS: @{me.username}", flush=True)
+    await idle()
+    await app.stop()
 
 if __name__ == "__main__":
     asyncio.run(main())
