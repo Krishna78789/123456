@@ -34,10 +34,9 @@ def run_health_server():
 
 threading.Thread(target=run_health_server, daemon=True).start()
 
-# 2. Telegram Bot Client & State
+# 2. Telegram Bot Client
 app = Client("txt_downloader_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# User-wise Cancel/Stop Flags
 USER_STOP_FLAGS = {}
 
 def humanbytes(size):
@@ -108,7 +107,7 @@ def fix_and_get_metadata(input_file):
         output_file
     ]
     try:
-        subprocess.run(cmd_remux, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        subprocess.run(cmd_remux, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=120)
         target_file = output_file if (os.path.exists(output_file) and os.path.getsize(output_file) > 1000) else input_file
     except Exception:
         target_file = input_file
@@ -125,7 +124,7 @@ def fix_and_get_metadata(input_file):
             "-of", "default=noprint_wrappers=1",
             target_file
         ]
-        res = subprocess.run(cmd_meta, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        res = subprocess.run(cmd_meta, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30)
         for line in res.stdout.splitlines():
             if line.startswith("width="):
                 width = int(line.split("=")[1])
@@ -141,7 +140,7 @@ def fix_and_get_metadata(input_file):
         "-vframes", "1", "-q:v", "2", thumb_path
     ]
     try:
-        subprocess.run(cmd_thumb, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(cmd_thumb, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
         if not (os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 0):
             thumb_path = None
     except Exception:
@@ -211,6 +210,9 @@ def download_video(url, output_path, status_msg, loop, custom_title, user_id):
         'format': 'best',
         'quiet': True,
         'no_warnings': True,
+        'socket_timeout': 30,           # हैंग होने से रोकने के लिए 30 सेकंड का टाइमआउट
+        'retries': 5,                   # कनेक्शन कटने पर 5 बार री-ट्राई
+        'fragment_retries': 5,
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         },
@@ -231,21 +233,21 @@ async def start_cmd(client: Client, message: Message):
     await message.reply_text(
         "👋 **नमस्ते!**\n\n"
         "मुझे लिंक्स वाली `.txt` फ़ाइल भेजें।\n"
-        "- **वीडियो लिंक**: वीडियो प्लेयर (16:9) में अपलोड होगी।\n"
-        "- **PDF लिंक**: सीधे PDF फ़ाइल के रूप में अपलोड होगी।\n\n"
-        "🛑 बीच में प्रोसेस रोकने के लिए किसी भी समय `/stop` भेज सकते हैं।"
+        "- **वीडियो लिंक**: 16:9 वीडियो प्लेयर में अपलोड होगी।\n"
+        "- **PDF लिंक**: डायरेक्ट डॉक्यूमेंट में अपलोड होगी।\n\n"
+        "🛑 प्रोसेस बीच में रोकने के लिए कभी भी `/stop` भेज सकते हैं।"
     )
 
 @app.on_message(filters.command("stop"))
 async def stop_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     USER_STOP_FLAGS[user_id] = True
-    await message.reply_text("🛑 **प्रोसेस को रोकने का अनुरोध प्राप्त हुआ!**\nचालू डाउनलोड पूरा होते ही या तुरंत प्रोसेस बंद कर दिया जाएगा।")
+    await message.reply_text("🛑 **रोकने का अनुरोध स्वीकार किया गया!**")
 
 @app.on_message(filters.document)
 async def handle_document(client: Client, message: Message):
     user_id = message.from_user.id
-    USER_STOP_FLAGS[user_id] = False  # नया टास्क शुरू होने पर स्टॉप रीसेट करें
+    USER_STOP_FLAGS[user_id] = False
 
     doc = message.document
     if not doc.file_name.endswith(".txt"):
@@ -292,7 +294,7 @@ async def handle_document(client: Client, message: Message):
 
         display_title = given_title if given_title else f"Item {index}"
 
-        # 1. यदि लिंक PDF है
+        # 1. PDF
         if is_pdf_url(url):
             try:
                 await status_msg.edit_text(f"⏳ **[{index}/{total_links}]** PDF डाउनलोड हो रही है:\n📄 **{display_title}**")
@@ -321,10 +323,10 @@ async def handle_document(client: Client, message: Message):
             except Exception as e:
                 await message.reply_text(f"⚠️ **[{index}/{total_links}] PDF एरर:**\nTitle: `{display_title}`\nकारण: `{str(e)[:200]}`")
 
-        # 2. यदि लिंक Video है
+        # 2. Video
         else:
             try:
-                await status_msg.edit_text(f"⏳ **[{index}/{total_links}]** वीडियो डाउनलोड शुरू:\n🎬 **{display_title}**")
+                await status_msg.edit_text(f"⏳ **[{index}/{total_links}]** डाउनलोड शुरू:\n🎬 **{display_title}**")
                 
                 final_video, duration, width, height, thumb_path, detected_title, raw_filename = await loop.run_in_executor(
                     None, download_video, url, download_dir, status_msg, loop, display_title, user_id
@@ -367,7 +369,7 @@ async def handle_document(client: Client, message: Message):
                 await message.reply_text(f"⚠️ **[{index}/{total_links}] वीडियो एरर:**\nTitle: `{display_title}`\nकारण: `{str(e)[:200]}`")
 
     if not USER_STOP_FLAGS.get(user_id, False):
-        await status_msg.edit_text("✅ सभी आइटम्स (वीडियो और PDF) सफलता पूर्वक अपलोड हो चुके हैं!")
+        await status_msg.edit_text("✅ सभी लेक्चर्स सफलता पूर्वक अपलोड हो चुके हैं!")
     else:
         await status_msg.edit_text("🛑 टास्क सफलतापूर्वक रोक दिया गया है।")
 
