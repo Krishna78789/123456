@@ -88,34 +88,52 @@ async def safe_edit_text(msg, text):
     except Exception:
         pass
 
-def fix_video_faststart(input_file):
-    """FFmpeg se moov atom ko video ke start me move karta hai taaki direct play ho sake"""
-    output_file = input_file + ".fixed.mp4"
-    cmd = [
+def fix_and_get_metadata(input_file):
+    """Video ko proper Telegram streamable MP4 banata hai aur duration/thumb nikalta hai"""
+    output_file = input_file + "_playable.mp4"
+    thumb_path = input_file + "_thumb.jpg"
+    
+    # 1. Remux to Standard Telegram MP4
+    cmd_remux = [
         "ffmpeg", "-y", "-i", input_file,
         "-c", "copy",
         "-movflags", "+faststart",
         output_file
     ]
     try:
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        if os.path.exists(output_file):
-            os.remove(input_file)
-            os.rename(output_file, input_file)
+        subprocess.run(cmd_remux, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        if os.path.exists(output_file) and os.path.getsize(output_file) > 1000:
+            target_file = output_file
+        else:
+            target_file = input_file
     except Exception:
-        if os.path.exists(output_file):
-            os.remove(output_file)
+        target_file = input_file
 
-def get_video_duration(file_path):
-    cmd = [
+    # 2. Get accurate duration
+    cmd_dur = [
         "ffprobe", "-v", "error", "-show_entries",
-        "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path
+        "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", target_file
+    ]
+    duration = 0
+    try:
+        res = subprocess.run(cmd_dur, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        duration = int(float(res.stdout.strip()))
+    except Exception:
+        pass
+
+    # 3. Generate Thumbnail at 5th second
+    cmd_thumb = [
+        "ffmpeg", "-y", "-ss", "00:00:05", "-i", target_file,
+        "-vframes", "1", "-q:v", "2", thumb_path
     ]
     try:
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-        return int(float(result.stdout.strip()))
+        subprocess.run(cmd_thumb, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if not (os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 0):
+            thumb_path = None
     except Exception:
-        return 0
+        thumb_path = None
+
+    return target_file, duration, thumb_path
 
 def download_video(url, output_path, status_msg, loop, custom_title):
     last_update_time = [0]
@@ -154,34 +172,30 @@ def download_video(url, output_path, status_msg, loop, custom_title):
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
+        raw_filename = ydl.prepare_filename(info)
         
-        # Video ko Telegram in-app playable banane ke liye faststart fix karein
-        fix_video_faststart(filename)
-        
-        duration = get_video_duration(filename) or info.get('duration', 0)
-        width = info.get('width', 1280)
-        height = info.get('height', 720)
+        final_video, duration, thumb_path = fix_and_get_metadata(raw_filename)
         detected_title = info.get('title') or custom_title
-        return filename, duration, width, height, detected_title
+        
+        return final_video, duration, thumb_path, detected_title, raw_filename
 
 @app.on_message(filters.command("start"))
 async def start_cmd(client: Client, message: Message):
     await message.reply_text(
-        "👋 **Namaste!**\n\n"
-        "Mujhe `.txt` file bhejein. Format:\n"
+        "👋 **नमस्ते!**\n\n"
+        "मुझे `.txt` फ़ाइल भेजें। फ़ॉर्मेट:\n"
         "`Lecture Name : https://link.com/video.mp4`\n\n"
-        "Videos direct playable player format me sahi duration ke saath upload honge."
+        "लेक्चर्स प्रॉपर थंबनेल और सही ड्यूरेशन के साथ सीधे प्ले होने वाले फ़ॉर्मेट में मिलेंगे।"
     )
 
 @app.on_message(filters.document)
 async def handle_document(client: Client, message: Message):
     doc = message.document
     if not doc.file_name.endswith(".txt"):
-        await message.reply_text("Kripya keval `.txt` file hi bhejein.")
+        await message.reply_text("कृपया केवल `.txt` फ़ाइल ही भेजें।")
         return
 
-    status_msg = await message.reply_text("📄 File mili, links load ho rahi hain...")
+    status_msg = await message.reply_text("📄 फ़ाइल मिल गई, लिंक्स लोड हो रही हैं...")
     download_dir = f"downloads/{message.from_user.id}"
     os.makedirs(download_dir, exist_ok=True)
 
@@ -206,53 +220,54 @@ async def handle_document(client: Client, message: Message):
 
     total_links = len(items)
     if total_links == 0:
-        await status_msg.edit_text("❌ File mein koi valid link nahi mili.")
+        await status_msg.edit_text("❌ फ़ाइल में कोई मान्य लिंक नहीं मिली।")
         if os.path.exists(file_path):
             os.remove(file_path)
         return
 
-    await status_msg.edit_text(f"Total **{total_links}** lectures mile. Process shuru ho raha hai...")
+    await status_msg.edit_text(f"कुल **{total_links}** लेक्चर्स मिले। प्रोसेसिंग शुरू हो रही है...")
     loop = asyncio.get_event_loop()
 
     for index, (given_title, url) in enumerate(items, start=1):
         display_title = given_title if given_title else f"Lecture {index}"
         try:
-            await status_msg.edit_text(f"⏳ **[{index}/{total_links}]** Download shuru:\n🎬 **{display_title}**")
+            await status_msg.edit_text(f"⏳ **[{index}/{total_links}]** डाउनलोड शुरू:\n🎬 **{display_title}**")
             
-            video_file, duration, width, height, detected_title = await loop.run_in_executor(
+            final_video, duration, thumb_path, detected_title, raw_filename = await loop.run_in_executor(
                 None, download_video, url, download_dir, status_msg, loop, display_title
             )
 
             final_title = given_title if given_title else detected_title
 
-            await status_msg.edit_text(f"📤 **[{index}/{total_links}]** Upload ho raha hai:\n🎬 **{final_title}**")
+            await status_msg.edit_text(f"📤 **[{index}/{total_links}]** टेलीग्राम पर अपलोड हो रहा है:\n🎬 **{final_title}**")
             start_time = time.time()
 
             caption_text = (
                 f"🎬 **Title**: {final_title}\n\n"
                 f"📌 **Part**: {index}/{total_links}\n"
-                f"⏱ **Duration**: {time_formatter(int(duration)) if duration else 'N/A'}"
+                f"⏱ **Duration**: {time_formatter(duration) if duration else 'N/A'}"
             )
 
             await client.send_video(
                 chat_id=message.chat.id,
-                video=video_file,
+                video=final_video,
                 caption=caption_text,
-                duration=int(duration) if duration else 0,
-                width=int(width) if width else 1280,
-                height=int(height) if height else 720,
+                duration=int(duration),
+                thumb=thumb_path,
                 supports_streaming=True,
                 progress=progress_for_pyrogram,
                 progress_args=("Uploading Video", status_msg, start_time, final_title)
             )
 
-            if os.path.exists(video_file):
-                os.remove(video_file)
+            # Cleanup
+            for f in [final_video, raw_filename, thumb_path]:
+                if f and os.path.exists(f):
+                    os.remove(f)
 
         except Exception as e:
-            await message.reply_text(f"⚠️ **[{index}/{total_links}] Error:**\nTitle: `{display_title}`\nReason: `{str(e)[:200]}`")
+            await message.reply_text(f"⚠️ **[{index}/{total_links}] एरर:**\nTitle: `{display_title}`\nकारण: `{str(e)[:200]}`")
 
-    await status_msg.edit_text("✅ Sabhi lectures properly upload ho chuke hain!")
+    await status_msg.edit_text("✅ सभी लेक्चर्स सफलता पूर्वक अपलोड हो चुके हैं!")
     if os.path.exists(file_path):
         os.remove(file_path)
 
