@@ -2,7 +2,7 @@ import os
 import asyncio
 import yt_dlp
 from aiohttp import web
-from pyrogram import Client, filters, idle
+from pyrogram import Client, filters
 from pyrogram.types import Message
 
 API_ID_RAW = os.environ.get("API_ID", "").strip()
@@ -10,20 +10,11 @@ API_HASH = os.environ.get("API_HASH", "").strip()
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 PORT = int(os.environ.get("PORT", 8000))
 
-print("--- BOT INITIALIZING ---", flush=True)
-print(f"API_ID loaded: {bool(API_ID_RAW)}", flush=True)
-print(f"API_HASH loaded: {bool(API_HASH)}", flush=True)
-print(f"BOT_TOKEN loaded: {bool(BOT_TOKEN)}", flush=True)
-
-try:
-    API_ID = int(API_ID_RAW)
-except Exception as e:
-    print(f"ERROR: API_ID galat hai (sirf numbers hone chahiye): {e}", flush=True)
-    API_ID = 0
+API_ID = int(API_ID_RAW) if API_ID_RAW else 0
 
 app = Client("txt_downloader_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# Dummy Web Server (Koyeb Health Check)
+# Koyeb Health-check Dummy Web Server
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
 
@@ -34,7 +25,7 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    print(f"Health-check server running on port {PORT}", flush=True)
+    print(f"Health-check web server active on port {PORT}", flush=True)
 
 def download_video(url, output_path):
     ydl_opts = {
@@ -103,14 +94,8 @@ async def handle_document(client: Client, message: Message):
     if os.path.exists(file_path):
         os.remove(file_path)
 
-async def main():
-    await start_web_server()
-    print("Telegram client start kiya ja raha hai...", flush=True)
-    await app.start()
-    me = await app.get_me()
-    print(f"BOT SUCCESSFULLY STARTED AS: @{me.username}", flush=True)
-    await idle()
-    await app.stop()
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    loop.create_task(start_web_server())
+    print("Bot run hone ke liye ready hai...", flush=True)
+    app.run()
